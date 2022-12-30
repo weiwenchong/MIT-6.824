@@ -1,10 +1,16 @@
 package mr
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"strings"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,6 +30,10 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+const (
+	mr_mid_out = "mr-mid-%d"
+	mr_out     = "mr-out-%d"
+)
 
 //
 // main/mrworker.go calls this function.
@@ -34,8 +44,103 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	//CallExample()
 
+	fmt.Printf("worker start\n")
+
+	for {
+		reply, err := CallAskTask(&AskTaskArgs{})
+		if err != nil {
+			continue
+		}
+		if reply.Done {
+			break
+		}
+		if reply.TaskType == TaskWait {
+			time.Sleep(time.Second)
+			continue
+		}
+
+		w := &worker{
+			AskTaskReply: reply,
+			mapf:         mapf,
+			reducef:      reducef,
+		}
+		fileName, err := w.Do()
+		if err != nil {
+			fmt.Printf("worker do err = %v\n", err)
+			continue
+		}
+		_, _ = CallFinishTask(&FinishTaskArgs{
+			TaskType:    reply.TaskType,
+			Index:       reply.Index,
+			ResFileName: fileName,
+		})
+
+		//time.Sleep(100 * time.Millisecond)
+	}
+
+	fmt.Printf("worker done\n")
+}
+
+type worker struct {
+	*AskTaskReply
+	mapf    func(string, string) []KeyValue
+	reducef func(string, []string) string
+}
+
+func (w *worker) Do() (fileName string, err error) {
+	switch w.TaskType {
+	case TaskTypeMap:
+		return w.m()
+	case TaskTypeReduce:
+		return w.r()
+	case TaskWait:
+		time.Sleep(100 * time.Millisecond)
+		return
+	default:
+		return "", errors.New("invalid task type")
+	}
+}
+
+func (w *worker) m() (fileName string, err error) {
+	content, err := os.ReadFile(w.FileName)
+	if err != nil {
+		return
+	}
+
+	kvs := w.mapf(w.FileName, string(content))
+	sb := strings.Builder{}
+	for _, kv := range kvs {
+		sb.WriteString(kv.Key)
+		sb.WriteString(" ")
+		sb.WriteString(kv.Value)
+		sb.WriteString("\n")
+	}
+
+	fileName = fmt.Sprintf(mr_mid_out, w.Index)
+	os.Remove(fileName)
+	err = ioutil.WriteFile(fileName, []byte(sb.String()), 0666)
+	return
+}
+
+func (w *worker) r() (fileName string, err error) {
+	content, err := os.ReadFile(w.FileName)
+	if err != nil {
+		return
+	}
+
+	words := strings.Split(string(content), " ")
+	if len(words) < 1 {
+		return "", errors.New("invalid file")
+	}
+	//fmt.Println(words)
+
+	res := w.reducef(words[0], words[1:])
+	fileName = fmt.Sprintf(mr_out, w.Index)
+	os.Remove(fileName)
+	err = ioutil.WriteFile(fileName, []byte(words[0]+" "+res), 0666)
+	return
 }
 
 //
@@ -67,6 +172,26 @@ func CallExample() {
 	}
 }
 
+func CallAskTask(args *AskTaskArgs) (reply *AskTaskReply, err error) {
+	reply = &AskTaskReply{}
+	ok := call("Coordinator.AskTask", args, reply)
+	if !ok {
+		return nil, errors.New("call ask task error")
+	}
+	//fmt.Printf("call ask task res:%v\n", reply)
+	return
+}
+
+func CallFinishTask(args *FinishTaskArgs) (reply *FinishTaskReply, err error) {
+	reply = &FinishTaskReply{}
+	ok := call("Coordinator.FinishTask", args, reply)
+	if !ok {
+		fmt.Printf("call finish task error")
+	}
+	//fmt.Printf("call ask task res:%v\n", reply)
+	return
+}
+
 //
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
@@ -88,4 +213,10 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 
 	fmt.Println(err)
 	return false
+}
+
+func Read() {
+	fmt.Println(os.Getwd())
+	content, err := os.ReadFile("pg-being_ernest.txt")
+	fmt.Println(content, err)
 }
